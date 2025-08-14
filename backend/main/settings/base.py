@@ -45,7 +45,6 @@ THIRD_PARTY_APPS = [
     "rest_framework",
     "django_filters",
     "rest_framework.authtoken",
-    "celerysqs",
 ]
 
 LOCAL_APPS = [

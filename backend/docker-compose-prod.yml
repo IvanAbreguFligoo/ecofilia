@@ -21,7 +21,7 @@ services:
   celery-worker:
     image: backend:latest          # reuse same image (has Django + Celery)
     container_name: celery-worker
-    command: bash -lc "celery -A proj worker -l info"
+    command: bash -lc "celery -A main worker -l info"
     env_file:
       - ./docker/.env
     depends_on:
