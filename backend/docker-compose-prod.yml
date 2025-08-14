@@ -17,11 +17,27 @@ services:
     restart: unless-stopped
     networks:
       - app-network
+
+  celery-worker:
+    image: backend:latest          # reuse same image (has Django + Celery)
+    container_name: celery-worker
+    command: bash -lc "celery -A proj worker -l info"
+    env_file:
+      - ./docker/.env
+    depends_on:
+      - backend
+    volumes:
+      - .:/code                    # optional; keep if your code mounts at runtime
+    restart: unless-stopped
+    networks:
+      - app-network
+    # Optional healthcheck:
     # healthcheck:
-    #   test: ["CMD-SHELL", "curl -sf http://localhost:8000/health || exit 1"]
-    #   interval: 15s
-    #   timeout: 3s
-    #   retries: 5
+    #   test: ["CMD", "bash", "-lc", "python - <<'PY'\nfrom celery.app.control import Control; from proj.celery import app; print('ok')\nPY"]
+    #   interval: 30s
+    #   timeout: 10s
+    #   retries: 3
+
 
   nginx:
     image: nginx:latest

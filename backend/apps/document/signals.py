@@ -1,32 +1,20 @@
 import logging
+from django.db import transaction
 from django.db.models.signals import post_save
 from django.dispatch import receiver
-from apps.document.models import Document, SmartChunk
-from apps.document.utils.chunker import chunk_text_and_embed
-from apps.document.utils.parser import parse_file
-import os
+from apps.document.models import Document, ChunkingStatus
+from apps.document.tasks import process_document_chunks
+
 logger = logging.getLogger(__name__)
 
-
 @receiver(post_save, sender=Document)
-def handle_document_post_save(sender, instance, created, **kwargs):
-    pass
-    logger.info(f"Document post_save signal triggered: ")
-    if not created or instance.chunking_done:
-        return
-    logger.info(f"Document {instance}, created: {created}")
+def handle_document_post_save(sender, instance: Document, created: bool, **kwargs):
+    logger.info("Document post_save triggered: id=%s, created=%s", instance.id, created)
 
-    try:
-        file_path = instance.file.path
-        text = parse_file(file_path)
-        chunks = chunk_text_and_embed(text, instance.id)
-        SmartChunk.objects.bulk_create(chunks)
-        instance.chunking_done = True
-        instance.chunking_status = "done"
-        instance.extracted_text = text
-        instance.save(update_fields=["chunking_done", "chunking_status", "extracted_text"])
-    except Exception as e:
-        logger.error(f"Failed to chunk document {instance.id}: {str(e)}")
-        instance.last_error = str(e)
-        instance.chunking_status = "error"
-        instance.save(update_fields=["last_error", "chunking_status"])
+    if not created or instance.chunking_done or instance.chunking_status == ChunkingStatus.DONE:
+        return
+
+    # Mark as pending so UI knows it's queued
+    Document.objects.filter(pk=instance.pk).update(chunking_status=ChunkingStatus.PENDING)
+
+    transaction.on_commit(lambda: process_document_chunks.delay(instance.pk))
