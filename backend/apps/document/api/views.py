@@ -1,18 +1,20 @@
 from rest_framework.views import APIView
-from rest_framework.generics import CreateAPIView, UpdateAPIView, ListAPIView, DestroyAPIView, RetrieveAPIView
+from rest_framework.generics import CreateAPIView, ListAPIView
+from rest_framework import status
+from rest_framework.response import Response
+from rest_framework.permissions import IsAuthenticated
+from rest_framework.authentication import SessionAuthentication, BasicAuthentication
+
 from django.db.models import Q
 
-from rest_framework.response import Response
-from rest_framework import status
 from apps.document.models import SmartChunk, Document
 from apps.document.api.filters import DocumentFilter
 from apps.document.api.serializers import SmartChunkSerializer, DocumentSerializer,DocumentCreateSerializer
-from rest_framework.decorators import permission_classes
-from rest_framework.permissions import IsAuthenticated
 
 
-@permission_classes([IsAuthenticated])
 class RAGQueryView(APIView):
+    authentication_classes = [SessionAuthentication, BasicAuthentication]
+    permission_classes = [IsAuthenticated]
     def get(self, request):
         query = request.query_params.get("query")
         if not query:
