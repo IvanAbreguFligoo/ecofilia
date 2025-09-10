@@ -1,5 +1,7 @@
 from __future__ import annotations
 import logging
+import os
+import tempfile
 from celery import shared_task
 from django.db import transaction
 from apps.document.models import Document, SmartChunk, ChunkingStatus
@@ -10,6 +12,7 @@ logger = logging.getLogger(__name__)
 
 @shared_task(bind=True, max_retries=3, default_retry_delay=30)
 def process_document_chunks(self, doc_id: int) -> str:
+    tmp_path = None
     try:
         doc = Document.objects.get(pk=doc_id)
 
@@ -19,23 +22,37 @@ def process_document_chunks(self, doc_id: int) -> str:
             return "already_done"
 
         # Mark as processing
-        doc.chunking_status = ChunkingStatus.PROCESSING
-        doc.save(update_fields=["chunking_status"])
+        Document.objects.filter(pk=doc_id).update(chunking_status=ChunkingStatus.PROCESSING)
 
-        file_path = doc.file.path
-        text = parse_file(file_path)
+        # --- Read file from storage (S3/local) -> temp file (parser-friendly path) ---
+        if not doc.file:
+            raise FileNotFoundError("Document has no attached file.")
 
-        chunks = chunk_text_and_embed(text, doc.id)
+        with doc.file.open("rb") as f_src, tempfile.NamedTemporaryFile(delete=False) as f_tmp:
+            tmp_path = f_tmp.name
+            for chunk in iter(lambda: f_src.read(1024 * 1024), b""):  # 1MB chunks
+                f_tmp.write(chunk)
+
+        # Parse & chunk
+        text = parse_file(tmp_path) or ""
+
+        chunks = chunk_text_and_embed(text, doc.id) or []
         if not chunks:
             logger.warning("No chunks produced for document %s.", doc_id)
 
-        SmartChunk.objects.bulk_create(chunks, ignore_conflicts=True, batch_size=1000)
+        # Save chunks + document state atomically
+        with transaction.atomic():
+            if chunks:
+                SmartChunk.objects.bulk_create(chunks, ignore_conflicts=True, batch_size=1000)
 
-        doc.extracted_text = text
-        doc.chunking_done = True
-        doc.chunking_status = ChunkingStatus.DONE
-        doc.last_error = ""
-        doc.save(update_fields=["extracted_text", "chunking_done", "chunking_status", "last_error"])
+            (Document.objects
+                .filter(pk=doc_id)
+                .update(
+                    extracted_text=text,
+                    chunking_done=True,
+                    chunking_status=ChunkingStatus.DONE,
+                    last_error=""
+                ))
 
         logger.info("Chunking completed for document %s (%d chunks).", doc_id, len(chunks))
         return "ok"
@@ -46,6 +63,7 @@ def process_document_chunks(self, doc_id: int) -> str:
 
     except Exception as e:
         logger.exception("Failed to chunk document %s: %s", doc_id, e)
+        # Try to persist error status
         try:
             Document.objects.filter(pk=doc_id).update(
                 last_error=str(e),
@@ -54,3 +72,11 @@ def process_document_chunks(self, doc_id: int) -> str:
         except Exception:
             pass
         return "error"
+
+    finally:
+        # Clean up temp file if created
+        if tmp_path and os.path.exists(tmp_path):
+            try:
+                os.remove(tmp_path)
+            except Exception:
+                logger.warning("Could not remove temp file %s", tmp_path)
