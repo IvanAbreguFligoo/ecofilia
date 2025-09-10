@@ -24,23 +24,28 @@ def process_document_chunks(self, doc_id: int) -> str:
         # Mark as processing
         Document.objects.filter(pk=doc_id).update(chunking_status=ChunkingStatus.PROCESSING)
 
-        # --- Read file from storage (S3/local) -> temp file (parser-friendly path) ---
+        # Ensure there's a file
         if not doc.file:
             raise FileNotFoundError("Document has no attached file.")
 
-        with doc.file.open("rb") as f_src, tempfile.NamedTemporaryFile(delete=False) as f_tmp:
+        # --- Create a temp file with the SAME extension so parse_file() can detect type ---
+        # Prefer extension from the stored file key; fallback to doc.name if needed
+        ext = os.path.splitext(doc.file.name or "")[1]
+        if not ext:
+            ext = os.path.splitext(doc.name or "")[1]
+
+        # Stream from storage (S3/local) to temp file with preserved suffix
+        with doc.file.open("rb") as f_src, tempfile.NamedTemporaryFile(suffix=ext or "", delete=False) as f_tmp:
             tmp_path = f_tmp.name
             for chunk in iter(lambda: f_src.read(1024 * 1024), b""):  # 1MB chunks
                 f_tmp.write(chunk)
 
-        # Parse & chunk
         text = parse_file(tmp_path) or ""
 
         chunks = chunk_text_and_embed(text, doc.id) or []
         if not chunks:
             logger.warning("No chunks produced for document %s.", doc_id)
 
-        # Save chunks + document state atomically
         with transaction.atomic():
             if chunks:
                 SmartChunk.objects.bulk_create(chunks, ignore_conflicts=True, batch_size=1000)
@@ -63,7 +68,6 @@ def process_document_chunks(self, doc_id: int) -> str:
 
     except Exception as e:
         logger.exception("Failed to chunk document %s: %s", doc_id, e)
-        # Try to persist error status
         try:
             Document.objects.filter(pk=doc_id).update(
                 last_error=str(e),
