@@ -1,4 +1,5 @@
 from django.contrib import admin
+from django.db.models.functions import Substr
 
 from .models import Document, SmartChunk
 
@@ -37,11 +38,37 @@ class DocumentAdmin(admin.ModelAdmin):
 
 @admin.register(SmartChunk)
 class SmartChunkAdmin(admin.ModelAdmin):
+    # keep columns tiny
     list_display = ("id", "document", "chunk_index", "preview_content", "token_count", "created_at")
-    search_fields = ("content","chunk_index")
-    list_filter = ("document",)
+    list_select_related = ("document",)
+    list_per_page = 50
     ordering = ("document", "chunk_index")
+    show_full_result_count = False  # avoid expensive COUNT(*)
 
-    def preview_content(self, obj):
-        return (obj.content[:100] + "...") if obj.content and len(obj.content) > 100 else obj.content
-    preview_content.short_extracted_text = "Content Preview"
+    # ✅ avoid LIKE on huge text; search small fields/FKs instead
+    search_fields = ("id", "document__name", "chunk_index")
+    # search_fields = ("content","chunk_index")
+
+    # ✅ filter only by related docs that actually appear in the result set
+    list_filter = (("document", admin.RelatedOnlyFieldListFilter),)
+
+    # If your Document table is big, this keeps the widget snappy on forms
+    autocomplete_fields = ("document",)
+
+    def get_queryset(self, request):
+        qs = super().get_queryset(request)
+        # ⚠️ Defer wide fields so the list view doesn't fetch them
+        # replace/add other wide fields if you have them (e.g., 'embedding', 'metadata_json', 'tokens_json')
+        qs = qs.defer("content")
+
+        # ✅ Annotate a short preview at the DB level (won’t load full content into memory)
+        qs = qs.annotate(_preview=Substr("content", 1, 120))
+        return qs
+
+    @admin.display(description="Content Preview")
+    def preview_content(self, obj: SmartChunk):
+        # Use DB-annotated preview; add ellipsis if original content is longer (best-effort without loading it)
+        # If you want a precise ellipsis only when >120, store content length separately or annotate Length().
+        preview = getattr(obj, "_preview", "") or ""
+        # keep it compact in the table
+        return (preview + "…") if len(preview) == 120 else preview
